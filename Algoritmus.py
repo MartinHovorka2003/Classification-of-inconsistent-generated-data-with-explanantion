@@ -54,26 +54,22 @@ for image_path in uploaded.keys():
     img_full_bgr = cv2.imread(image_path)
 
     # ------------------------------------------
-    # RESIZE A KONVERZIA NA PNG (max 800x600 pri zachovaní pomeru strán)
+    # RESIZE A KONVERZIA NA PNG (Goldilocks pravidlo: ~800x600)
     # ------------------------------------------
     h, w = img_full_bgr.shape[:2]
-    # Vypočítame mierku tak, aby ani jeden rozmer neprekročil 800x600
     scale = min(800/w, 600/h)
 
-    # Zmenšíme len ak je obrázok väčší ako 800x600, inak necháme pôvodnú veľkosť
     if scale < 1.0:
         new_w, new_h = int(w * scale), int(h * scale)
         img_full_bgr = cv2.resize(img_full_bgr, (new_w, new_h), interpolation=cv2.INTER_AREA)
     else:
         new_w, new_h = w, h
 
-    # Uloženie do PNG formátu
     base_name = os.path.splitext(image_path)[0]
     png_path = f"{base_name}_compressed.png"
     cv2.imwrite(png_path, img_full_bgr)
     print(f"Obrázok bol upravený na rozlíšenie {new_w}x{new_h} a uložený ako: {png_path}")
 
-    # Konverzia na RGB pre zobrazenie v matplotlib
     img_full_rgb = cv2.cvtColor(img_full_bgr, cv2.COLOR_BGR2RGB)
 
     # ------------------------------------------
@@ -81,7 +77,6 @@ for image_path in uploaded.keys():
     # ------------------------------------------
     split_orientation = input("Sú zrkadlo a objekt vedľa seba (zadajte 'V') alebo nad sebou (zadajte 'H')? [V/H/Skip]: ").strip().upper()
 
-    # Umožníme preskočiť obrázok, ak používateľ zadá 'SKIP'
     if split_orientation == 'SKIP':
         print("Preskakujem tento obrázok...")
         continue
@@ -119,7 +114,7 @@ for image_path in uploaded.keys():
         img_object_bgr = img_full_bgr[:, split_x:]
 
     # ------------------------------------------
-    # SPRACOVANIE A EXTRAKCIA (Pre aktuálny obrázok)
+    # SPRACOVANIE A EXTRAKCIA
     # ------------------------------------------
     mirror_rgb = cv2.cvtColor(img_mirror_bgr, cv2.COLOR_BGR2RGB)
     object_rgb = cv2.cvtColor(img_object_bgr, cv2.COLOR_BGR2RGB)
@@ -135,22 +130,6 @@ for image_path in uploaded.keys():
 
     object_flipped = cv2.flip(gray_object, 1)
     object_flipped_rgb = cv2.flip(object_rgb, 1)
-
-    # VIZUALIZÁCIA 1 & 2
-    plt.figure(figsize=(16, 5))
-    plt.subplot(1, 3, 1)
-    plt.imshow(mirror_rgb)
-    plt.title('Zrkadlo')
-    plt.axis('off')
-    plt.subplot(1, 3, 2)
-    plt.imshow(object_rgb)
-    plt.title('Pôvodný objekt')
-    plt.axis('off')
-    plt.subplot(1, 3, 3)
-    plt.imshow(object_flipped_rgb)
-    plt.title('Prevrátený objekt (na párovanie)')
-    plt.axis('off')
-    plt.show()
 
     print("\nExtrahujem kľúčové body (SuperPoint)...")
     pts_mirror, desc_mirror, _ = superpoint.run(gray_mirror)
@@ -186,7 +165,6 @@ for image_path in uploaded.keys():
             self.queryIdx, self.trainIdx, self.distance = queryIdx, trainIdx, distance
 
     good_matches = [SimpleMatch(q, t, 1.0 - mscores[q]) for q, t in zip(valid_indices, matched_indices1)]
-    good_matches.sort(key=lambda x: x.distance)
 
     if len(good_matches) < 5:
         print("❌ Nenašiel sa dostatok zhôd pre tento obrázok!")
@@ -195,7 +173,7 @@ for image_path in uploaded.keys():
     src_pts = np.float32([kp_mirror[m.queryIdx] for m in good_matches])
     dst_pts_flipped = np.float32([kp_flipped[m.trainIdx] for m in good_matches])
 
-    # RANSAC so striktným prahom (Quality over Quantity) thresh = 10.0
+    # RANSAC so striktným prahom
     best_H, best_mask = cv2.findHomography(src_pts, dst_pts_flipped, cv2.RANSAC, 10.0)
 
     if best_H is None:
@@ -215,7 +193,7 @@ for image_path in uploaded.keys():
     canvas[:h_m, :w_m] = mirror_rgb
     canvas[:h_o, w_m:] = object_rgb
 
-    # VIZUALIZÁCIA 3
+    # VIZUALIZÁCIA (Spojené inliers)
     plt.figure(figsize=(12, 6))
     plt.imshow(canvas)
     colors = plt.cm.rainbow(np.linspace(0, 1, len(src_inliers)))
@@ -232,6 +210,7 @@ for image_path in uploaded.keys():
     plt.tight_layout()
     plt.show()
 
+    # Výpočet priesečníkov
     def line_intersection(line1, line2):
         (x1, y1), (x2, y2) = line1
         (x3, y3), (x4, y4) = line2
@@ -241,88 +220,95 @@ for image_path in uploaded.keys():
         y = ((x1*y2 - y1*x2)*(y3 - y4) - (y1 - y2)*(x3*y4 - y3*x4)) / denom
         return (x, y)
 
-    all_intersections, intersection_weights = [], []
+    all_intersections = []
     for i in range(len(lines)):
         for j in range(i+1, len(lines)):
             pt = line_intersection(lines[i], lines[j])
             if pt:
-                l1 = np.hypot(lines[i][1][0]-lines[i][0][0], lines[i][1][1]-lines[i][0][1])
-                l2 = np.hypot(lines[j][1][0]-lines[j][0][0], lines[j][1][1]-lines[j][0][1])
                 all_intersections.append(pt)
-                intersection_weights.append(1.0)
 
     if len(all_intersections) < 3:
         print("❌ Nedostatok priesečníkov na analýzu.")
         continue
 
     all_intersections = np.array(all_intersections)
-    intersection_weights = np.array(intersection_weights)
+    filtered = all_intersections.copy()
 
-    # IQR Filtrácia
+    # ==========================================
+    # 3. ROBUSTNÁ PRIESTOROVÁ FILTRÁCIA (IQR)
+    # ==========================================
     for _ in range(3):
-            if len(filtered) < 5:
-                break
+        if len(filtered) < 5:
+            break
 
-            # 1. Extrakcia X a Y súradníc pre prehľadnejšiu matematiku
-            x_coords = filtered[:, 0]
-            y_coords = filtered[:, 1]
+        # Extrakcia súradníc
+        x_coords = filtered[:, 0]
+        y_coords = filtered[:, 1]
 
-            # 2. Výpočet IQR hraníc pre os X
-            q1_x, q3_x = np.percentile(x_coords, [25, 75])
-            iqr_x = q3_x - q1_x
-            h_dolna_x = q1_x - (1.5 * iqr_x)
-            h_horna_x = q3_x + (1.5 * iqr_x)
+        # Výpočet IQR hraníc pre os X
+        q1_x, q3_x = np.percentile(x_coords, [25, 75])
+        iqr_x = q3_x - q1_x
+        h_dolna_x = q1_x - (1.5 * iqr_x)
+        h_horna_x = q3_x + (1.5 * iqr_x)
 
-            # 3. Výpočet IQR hraníc pre os Y
-            q1_y, q3_y = np.percentile(y_coords, [25, 75])
-            iqr_y = q3_y - q1_y
-            h_dolna_y = q1_y - (1.5 * iqr_y)
-            h_horna_y = q3_y + (1.5 * iqr_y)
+        # Výpočet IQR hraníc pre os Y
+        q1_y, q3_y = np.percentile(y_coords, [25, 75])
+        iqr_y = q3_y - q1_y
+        h_dolna_y = q1_y - (1.5 * iqr_y)
+        h_horna_y = q3_y + (1.5 * iqr_y)
 
-            # 4. Definovanie "Bezpečnej zóny" (bod musí byť v limitoch pre obe osi)
-            valid_x = (x_coords >= h_dolna_x) & (x_coords <= h_horna_x)
-            valid_y = (y_coords >= h_dolna_y) & (y_coords <= h_horna_y)
-            safe_zone_mask = valid_x & valid_y
+        # Definovanie "Bezpečnej zóny"
+        valid_x = (x_coords >= h_dolna_x) & (x_coords <= h_horna_x)
+        valid_y = (y_coords >= h_dolna_y) & (y_coords <= h_horna_y)
+        safe_zone_mask = valid_x & valid_y
 
-            # 5. Aplikácia masky: ponecháme len platné body a ich váhy
-            filtered = filtered[safe_zone_mask]
-            w_filtered = w_filtered[safe_zone_mask]
+        # Aplikácia masky
+        filtered = filtered[safe_zone_mask]
 
-    # DBSCAN
+    # ==========================================
+    # 4. ZHLUKOVANIE (DBSCAN) A ŠTATISTIKA
+    # ==========================================
     if len(filtered) >= 10:
-        scaled = StandardScaler().fit_transform(filtered)
-        neigh = NearestNeighbors(n_neighbors=min(5, len(filtered)-1)).fit(scaled)
-        dists, _ = neigh.kneighbors(scaled)
-        eps_auto = np.median(np.sort(dists[:,-1])) * 1.5
+      scaled = StandardScaler().fit_transform(filtered)
+      neigh = NearestNeighbors(n_neighbors=min(5, len(filtered)-1)).fit(scaled)
+      dists, _ = neigh.kneighbors(scaled)
+      eps_auto = np.median(np.sort(dists[:,-1])) * 1.5
 
-        labels = DBSCAN(eps=eps_auto, min_samples=min(3, len(filtered)//5)).fit_predict(scaled)
+      labels = DBSCAN(eps=eps_auto, min_samples=min(3, len(filtered)//5)).fit_predict(scaled)
 
-        clusters = {lbl: np.sum(labels == lbl) for lbl in set(labels) if lbl != -1}
-        if clusters:
-            best_label = max(clusters, key=clusters.get)
-            main_cluster = filtered[labels == best_label]
-            weights_main = w_filtered[labels == best_label]
+      clusters = {}
+      unique_labels = set(labels)
+      for lbl in unique_labels:
+          if lbl != -1:
+              points_in_cluster = np.sum(labels == lbl)
+              clusters[lbl] = points_in_cluster
+
+      if clusters:
+          best_label = max(clusters, key=clusters.get)
+          main_cluster = filtered[labels == best_label]
         else:
-            main_cluster, weights_main = filtered, w_filtered
+            main_cluster = filtered
     else:
-        main_cluster, weights_main = filtered, w_filtered
+        main_cluster = filtered
 
-    # Štatistiky zhluku
+    # Výpočet čistej priestorovej štatistiky
     if len(main_cluster) > 0:
-        w_norm = weights_main / weights_main.sum()
-        mean_x, mean_y = np.sum(main_cluster[:,0] * w_norm), np.sum(main_cluster[:,1] * w_norm)
-        #weighted_spread = np.sqrt(np.sum(w_norm * (main_cluster[:,0] - mean_x)**2) + np.sum(w_norm * (main_cluster[:,1] - mean_y)**2))
+        mean_x = np.mean(main_cluster[:,0])
+        mean_y = np.mean(main_cluster[:,1])
+
+        spatial_spread = np.sqrt(np.std(main_cluster[:,0])**2 + np.std(main_cluster[:,1])**2)
+
         median_x = np.median(main_cluster[:,0])
         median_y = np.median(main_cluster[:,1])
         iqr_spread = np.hypot(np.percentile(main_cluster[:,0], 75) - np.percentile(main_cluster[:,0], 25),
                               np.percentile(main_cluster[:,1], 75) - np.percentile(main_cluster[:,1], 25)) / 2
     else:
-        mean_x, mean_y = np.mean(filtered, axis=0)
-        #weighted_spread = np.sqrt(np.std(filtered[:,0])**2 + np.std(filtered[:,1])**2)
+        mean_x, mean_y = np.mean(filtered, axis=0) if len(filtered) > 0 else (0,0)
+        spatial_spread = np.sqrt(np.std(filtered[:,0])**2 + np.std(filtered[:,1])**2) if len(filtered) > 0 else 0
         median_x, median_y = mean_x, mean_y
         iqr_spread = 0
 
-    # VIZUALIZÁCIA 4
+    # VIZUALIZÁCIA GEOMETRIE
     plt.figure(figsize=(12, 6))
     for line in lines:
         plt.plot([line[0][0], line[1][0]], [line[0][1], line[1][1]], 'gray', alpha=0.1, linewidth=1)
@@ -330,7 +316,7 @@ for image_path in uploaded.keys():
     plt.scatter(all_intersections[:,0], all_intersections[:,1], c='lightgray', s=15, alpha=0.4, label='Priesečníky')
     plt.scatter(filtered[:,0], filtered[:,1], c='orange', s=25, alpha=0.5, label='Filtrované priesečníky')
     plt.scatter(main_cluster[:,0], main_cluster[:,1], c='red', s=50, alpha=0.8, edgecolors='white', label=f'Hlavný zhluk ({len(main_cluster)})')
-    plt.scatter(mean_x, mean_y, c='gold', s=300, marker='*', edgecolors='black', label='Vážený stred')
+    plt.scatter(mean_x, mean_y, c='gold', s=300, marker='*', edgecolors='black', label='Priestorový stred')
     plt.scatter(median_x, median_y, c='lime', s=200, marker='P', edgecolors='black', label='Stred (Medián)')
     plt.axvline(x=w_m, color='cyan', linestyle='--', linewidth=2, alpha=0.8, label='Hranica zrkadla')
 
@@ -352,16 +338,47 @@ for image_path in uploaded.keys():
     plt.ylim(y_max_plot, y_min_plot)
     plt.xlabel('X súradnica')
     plt.ylabel('Y súradnica')
-    plt.title(f'Analýza konvergencie čiar pre {png_path}\nVážený rozptyl: {weighted_spread:.1f} px | IQR rozptyl: {iqr_spread:.1f} px')
+    plt.title(f'Analýza konvergencie pre {png_path}\nPriestorový rozptyl: {spatial_spread:.1f} px | IQR rozptyl: {iqr_spread:.1f} px')
     plt.legend(loc='upper right')
     plt.grid(True, alpha=0.2)
     plt.tight_layout()
     plt.show()
 
-    avg_spread = (weighted_spread + iqr_spread) / 2
-    print("\n" + "="*60 + "\n VÝSLEDOK\n" + "="*60)
-    if avg_spread < 40: print("✅ VÝBORNÁ KONVERGENCIA - Geometria zrkadla je veľmi presná")
-    elif avg_spread < 130: print("✓ DOBRÁ KONVERGENCIA - Geometria zrkadla je prijateľná")
-    elif avg_spread < 200: print("⚠️ SLABÁ KONVERGENCIA - Výrazné nezrovnalosti")
-    else: print("❌ ŽIADNA KONVERGENCIA - Nespoľahlivá geometria zrkadla")
-    print(f" Priemerný rozptyl: {avg_spread:.1f} pixelov\n")
+    # ==========================================
+    # 5. FINÁLNY VERDIKT
+    # ==========================================
+    avg_spread = (spatial_spread + iqr_spread) / 2
+
+    print("\n" + "="*60)
+    print(" VÝSLEDOK ANALÝZY GEOMETRIE")
+    print("="*60)
+
+    if avg_spread < 40.0:
+            print(" ✅ VÝBORNÁ KONVERGENCIA: Autentická geometria")
+            print("    Lúče odrazu vykazujú mimoriadne presnú zbiehavosť do jedného")
+            print("    matematického bodu. Takto nízky rozptyl je charakteristický")
+            print("    pre reálne fotografie s kvalitným rovným zrkadlom.")
+            
+        elif avg_spread < 130.0:
+            print(" ✓ PRIRODZENÁ KONVERGENCIA: Pravdepodobne reálna fotografia")
+            print("    Geometria zrkadla je prijateľná a zachováva 3D perspektívu.")
+            print("    Zaznamenaný rozptyl je v medziach normy a býva spôsobený")
+            print("    bežným skreslením šošovky, drobným šumom alebo textúrou.")
+            
+        elif avg_spread < 200.0:
+            print(" ⚠️ SLABÁ KONVERGENCIA: Výrazné nezrovnalosti (Šedá zóna)")
+            print("    Priesečníky lúčov sú príliš rozptýlené, čo narúša fyzikálny")
+            print("    model odrazu. Môže ísť o AI generovaný obraz, silne zakrivené")
+            print("    zrkadlo, alebo mäkký/členitý materiál pôvodného objektu.")
+            
+        else:
+            print(" ❌ ŽIADNA KONVERGENCIA: Fyzikálne nemožná geometria")
+            print("    Čiary sa zbiehajú úplne chaoticky a netvoria spoločný úbežník.")
+            print("    Zákony optiky tu zlyhali, čo je s veľmi vysokou pravdepodobnosťou")
+            print("    dôkazom toho, že ide o syntetický (AI generovaný) fake obraz.")
+
+    print("-" * 60)
+    print(f" Priestorový rozptyl: {spatial_spread:.1f} px")
+    print(f" IQR rozptyl: {iqr_spread:.1f} px")
+    print(f" Priemerný rozptyl: {avg_spread:.1f} px")
+    print("="*60 + "\n")
